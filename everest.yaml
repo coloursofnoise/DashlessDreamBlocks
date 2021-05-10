@@ -1,0 +1,6 @@
+- Name: DashlessDreamBlocks
+  Version: 2.0.0
+  DLL: bin/Debug/DashlessDreamBlocks.dll
+  Dependencies:
+    - Name: Everest
+      Version: 1.2803.0
