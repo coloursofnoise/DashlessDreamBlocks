@@ -1,7 +1,9 @@
-﻿using Microsoft.Xna.Framework;
+﻿using Celeste.Mod.Entities;
+using Microsoft.Xna.Framework;
 using Monocle;
 using MonoMod.Cil;
 using MonoMod.RuntimeDetour;
+using MonoMod.Utils;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -14,16 +16,38 @@ namespace Celeste.Mod.DashlessDreamBlocks {
         public override Type SettingsType => typeof(DashlessDreamBlocksSettings);
         public static DashlessDreamBlocksSettings Settings => (DashlessDreamBlocksSettings) Instance._Settings;
 
-        public static int StDashlessDreamDash;
+        /// <summary>
+        /// Used for <see cref="Session" /> Flags and <see cref="DynData{T}" /> pseudo-fields.
+        /// </summary>
+        public const string PROPERTY_KEY = "DASHLESSDREAMBLOCKS_INVENTORY";
+        public const string INVENTORY_PREFIX = "DashlessDreaming";
+        public const string INVENTORY_NOBACKPACK = "(No Backpack)";
+        public static readonly PlayerInventory DashlessDreamBlockInventory = new PlayerInventory(dashes: 0, dreamDash: true, backpack: true, noRefills: false);
+
+        public static int StDashlessDreamDash { get; private set; }
 
         public DashlessDreamBlocksModule() {
             Instance = this;
+        }
+
+        public override void PrepareMapDataProcessors(MapDataFixup context) {
+            context.Add<DashlessDreamBlocksMapProcessor>();
         }
 
         private static List<IDetour> stateHooks = new List<IDetour>();
         private static string[] names = new string[] { "Normal", "Climb", "Swim", "StarFly" };
 
         public override void Load() {
+            // Loading
+            On.Celeste.Mod.Meta.MapMeta.GetInventory += MapMeta_GetInventory;
+            On.Celeste.Session.ctor_AreaKey_string_AreaStats += Session_ctor;
+            // This is required because, even though it calls the above Session ctor, that hook isn't always called.
+            On.Celeste.Session.Restart += Session_Restart;
+            On.Celeste.Mod.Entities.ChangeInventoryTrigger.ctor += ChangeInventoryTrigger_ctor;
+            On.Celeste.Mod.Entities.ChangeInventoryTrigger.OnEnter += ChangeInventoryTrigger_OnEnter;
+
+            // Behaviour
+
             // Add StDashlessDreamDash (intermediary state to replace the DashBegin and DashCoroutine)
             On.Celeste.Player.ctor += Player_ctor;
 
@@ -34,7 +58,7 @@ namespace Celeste.Mod.DashlessDreamBlocks {
                 stateHooks.Add(new Hook(stateUpdate, hook_Player_StateUpdate));
             }
 
-
+            // Remove requirement for Dashes when checking for DashlessDreamDash
             IL.Celeste.Player.DreamDashCheck += Player_DreamDashCheck;
 
             // Restrict the angles allowed for a DashlessDreamDash
@@ -42,6 +66,12 @@ namespace Celeste.Mod.DashlessDreamBlocks {
         }
 
         public override void Unload() {
+            On.Celeste.Mod.Meta.MapMeta.GetInventory -= MapMeta_GetInventory;
+            On.Celeste.Session.ctor_AreaKey_string_AreaStats -= Session_ctor;
+            On.Celeste.Session.Restart -= Session_Restart;
+            On.Celeste.Mod.Entities.ChangeInventoryTrigger.ctor -= ChangeInventoryTrigger_ctor;
+            On.Celeste.Mod.Entities.ChangeInventoryTrigger.OnEnter -= ChangeInventoryTrigger_OnEnter;
+
             On.Celeste.Player.ctor -= Player_ctor;
 
             stateHooks.ForEach(h => h.Dispose());
@@ -49,6 +79,65 @@ namespace Celeste.Mod.DashlessDreamBlocks {
             IL.Celeste.Player.DreamDashCheck -= Player_DreamDashCheck;
 
             IL.Celeste.PlayerDashAssist.Update -= PlayerDashAssist_Update;
+        }
+
+        private static PlayerInventory? MapMeta_GetInventory(On.Celeste.Mod.Meta.MapMeta.orig_GetInventory orig, string meta) {
+            if (meta.StartsWith(INVENTORY_PREFIX)) {
+                var inventory = DashlessDreamBlockInventory;
+                if (meta.Contains(INVENTORY_NOBACKPACK))
+                    inventory.Backpack = false;
+                return inventory;
+            }
+
+            return orig(meta);
+        }
+
+        private static void Session_ctor(On.Celeste.Session.orig_ctor_AreaKey_string_AreaStats orig, Session self, AreaKey area, string checkpoint, AreaStats oldStats) {
+            //Console.WriteLine("------------------- Creating Session ----------------");
+            orig(self, area, checkpoint, oldStats);
+
+            if (new DynData<MapData>(self.MapData).Data.TryGetValue(PROPERTY_KEY, out object val)) {
+                Logger.Log("DashlessDreamBlocks", "Loading level with DashlessDreaming Inventory");
+                self.SetFlag(PROPERTY_KEY, (bool) val);
+            }
+        }
+
+        private static Session Session_Restart(On.Celeste.Session.orig_Restart orig, Session self, string intoLevel) {
+            //Console.WriteLine("------------------- Restarting Session ----------------");
+            Session res = orig(self, intoLevel);
+
+            if (new DynData<MapData>(res.MapData).Data.TryGetValue(PROPERTY_KEY, out object val)) {
+                Logger.Log("DashlessDreamBlocks", "Loading level with DashlessDreaming Inventory");
+                res.SetFlag(PROPERTY_KEY, (bool) val);
+            }
+            return res;
+        }
+
+        private static void ChangeInventoryTrigger_ctor(On.Celeste.Mod.Entities.ChangeInventoryTrigger.orig_ctor orig, ChangeInventoryTrigger self, EntityData data, Vector2 offset) {
+            string inventoryStr = data.Attr("inventory");
+            if (inventoryStr.StartsWith(INVENTORY_PREFIX))
+                data.Values["inventory"] = "Default";
+
+            orig(self, data, offset);
+
+            if (inventoryStr.StartsWith(INVENTORY_PREFIX)) {
+                var triggerData = new DynData<ChangeInventoryTrigger>(self);
+
+                var inventory = DashlessDreamBlockInventory;
+                if (inventoryStr.Contains(INVENTORY_NOBACKPACK))
+                    inventory.Backpack = false;
+
+                triggerData["inventory"] = inventory;
+                triggerData[PROPERTY_KEY] = true;
+            }
+        }
+
+        private static void ChangeInventoryTrigger_OnEnter(On.Celeste.Mod.Entities.ChangeInventoryTrigger.orig_OnEnter orig, ChangeInventoryTrigger self, Player player) {
+            orig(self, player);
+
+            if (new DynData<ChangeInventoryTrigger>(self).Data.TryGetValue(PROPERTY_KEY, out object val)) {
+                self.SceneAs<Level>().Session.SetFlag(PROPERTY_KEY, (bool) val);
+            }
         }
 
         /// <summary>
@@ -60,6 +149,10 @@ namespace Celeste.Mod.DashlessDreamBlocks {
             StDashlessDreamDash = self.StateMachine.AddState(self.DashlessUpdate, self.DashlessCoroutine, self.DashlessBegin, null);
         }
 
+        private static bool CanDashlessDreamDash(Session session) {
+            return Settings.OverrideEnabled || session.GetFlag(PROPERTY_KEY);
+        }
+
         private static MethodInfo m_DreamDashCheck = typeof(Player).GetMethod("DreamDashCheck", BindingFlags.NonPublic | BindingFlags.Instance);
         private static FieldInfo f_demoDashed = typeof(Player).GetField("demoDashed", BindingFlags.NonPublic | BindingFlags.Instance);
         private static FieldInfo f_lastAim = typeof(Player).GetField("lastAim", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -68,19 +161,23 @@ namespace Celeste.Mod.DashlessDreamBlocks {
         /// Hooks a Player <see cref="Monocle.StateMachine" /> Update method to set the player state to <see cref="StDashlessDreamDash" />.
         /// </summary>
         private static int Player_StateUpdate(Func<Player, int> orig, Player self) {
-            Vector2 lastAim = (Vector2) f_lastAim.GetValue(self);
-            if (!(self.Dashes > 0) && (Input.DashPressed || Input.CrouchDashPressed) && 
-                (DashlessDreamDashCheck(self, lastAim.YComp()) || DashlessDreamDashCheck(self, lastAim.XComp()) && 
-                (TalkComponent.PlayerOver == null || !Input.Talk.Pressed))) {
-                f_demoDashed.SetValue(self, Input.CrouchDashPressed);
-                Input.Dash.ConsumeBuffer();
-                Input.CrouchDash.ConsumeBuffer();
-                self.DashDir = lastAim;
-                return StDashlessDreamDash;
+            if (CanDashlessDreamDash(self.SceneAs<Level>().Session)) {
+                Vector2 lastAim = (Vector2) f_lastAim.GetValue(self);
+                if (!(self.Dashes > 0) && (Input.DashPressed || Input.CrouchDashPressed) &&
+                    (DashlessDreamDashCheck(self, lastAim.YComp()) || DashlessDreamDashCheck(self, lastAim.XComp()) &&
+                    (TalkComponent.PlayerOver == null || !Input.Talk.Pressed))) {
+                    f_demoDashed.SetValue(self, Input.CrouchDashPressed);
+                    Input.Dash.ConsumeBuffer();
+                    Input.CrouchDash.ConsumeBuffer();
+                    self.DashDir = lastAim;
+                    return StDashlessDreamDash;
+                }
             }
 
             return orig(self);
         }
+
+        public static Vector2 DreamBlockDir;
 
         private static bool dashlesscheck = false;
 
@@ -93,9 +190,9 @@ namespace Celeste.Mod.DashlessDreamBlocks {
             Vector2 dashDir = player.DashDir;
             player.DashDir = dir;
             dashlesscheck = true;
-            bool res = (bool) m_DreamDashCheck.Invoke(player, new object[]{ dir });
+            bool res = (bool) m_DreamDashCheck.Invoke(player, new object[] { dir });
             if (res)
-                Extensions.DreamBlockDir = dir;
+                DreamBlockDir = Vector2.Clamp(dir, -Vector2.One, Vector2.One);
             dashlesscheck = false;
             player.DashDir = dashDir;
             return res;
@@ -105,13 +202,13 @@ namespace Celeste.Mod.DashlessDreamBlocks {
         /// Replaces <see cref="Player.DashAttacking" /> with
         /// <code>
         ///     (<see cref="Player.DashAttacking" /> || 
-        ///     (<see cref="dashlesscheck" /> &amp;&amp; <see cref="DashlessDreamBlocksSettings.Enabled" />))
+        ///     (<see cref="dashlesscheck" /> &amp;&amp; <see cref="DashlessDreamBlocksSettings.OverrideEnabled" />))
         /// </code>
         /// </summary>
         private static void Player_DreamDashCheck(ILContext ctx) {
             ILCursor cursor = new ILCursor(ctx);
             if (cursor.TryGotoNext(MoveType.After, instr => instr.MatchCallvirt<Player>("get_DashAttacking"))) {
-                cursor.EmitDelegate<Func<bool, bool>>(val => val || (dashlesscheck && Settings.Enabled));
+                cursor.EmitDelegate<Func<bool, bool>>(val => val || (dashlesscheck));
             }
         }
 
@@ -122,7 +219,7 @@ namespace Celeste.Mod.DashlessDreamBlocks {
         private static float CorrectDashAngle(float angle) {
             Player player = Engine.Scene.Tracker.GetEntity<Player>();
             if (player != null && player.StateMachine.State == StDashlessDreamDash) {
-                float initialAngle = Extensions.DreamBlockDir.Angle();
+                float initialAngle = DreamBlockDir.Angle();
                 float diff = Calc.AngleDiff(initialAngle, angle);
                 if (Math.Abs(diff) >= Calc.QuarterCircle) {
                     if (Math.Abs(diff) > Calc.EighthCircle * 3)
@@ -133,6 +230,8 @@ namespace Celeste.Mod.DashlessDreamBlocks {
             return angle;
         }
 
+        public static float? DashAssistOverride;
+
         /// <summary>
         /// Emits a Delegate to replace the AimVector angle with a corrected one using <see cref="CorrectDashAngle" />.
         /// </summary>
@@ -141,7 +240,7 @@ namespace Celeste.Mod.DashlessDreamBlocks {
             if (cursor.TryGotoNext(MoveType.After, instr => instr.MatchCall("Monocle.Calc", "Angle"))) {
                 cursor.EmitDelegate<Func<float, float>>(angle => {
                     float corrected = CorrectDashAngle(angle);
-                    Extensions.DashAssistOverride = corrected;
+                    DashAssistOverride = corrected;
                     return corrected;
                 });
             }
@@ -156,9 +255,6 @@ namespace Celeste.Mod.DashlessDreamBlocks {
         private static MethodInfo m_DashAssistInit = typeof(Player).GetMethod("DashAssistInit", BindingFlags.NonPublic | BindingFlags.Instance);
         private static MethodInfo m_CorrectDashPrecision = typeof(Player).GetMethod("CorrectDashPrecision", BindingFlags.NonPublic | BindingFlags.Instance);
         private static MethodInfo m_CreateTrail = typeof(Player).GetMethod("CreateTrail", BindingFlags.NonPublic | BindingFlags.Instance);
-
-        public static Vector2 DreamBlockDir;
-        public static float? DashAssistOverride;
 
         public static void DashlessBegin(this Player self) {
             if (Engine.TimeRate > 0.25f)
@@ -175,7 +271,7 @@ namespace Celeste.Mod.DashlessDreamBlocks {
             else if (!self.Ducking && ((bool) f_demoDashed.GetValue(self) || Input.MoveY.Value == 1))
                 self.Ducking = true;
 
-            DashAssistOverride = null;
+            DashlessDreamBlocksModule.DashAssistOverride = null;
             m_DashAssistInit.Invoke(self, null);
         }
 
@@ -193,15 +289,16 @@ namespace Celeste.Mod.DashlessDreamBlocks {
             if (SaveData.Instance.Assists.DashAssist)
                 Input.Rumble(RumbleStrength.Strong, RumbleLength.Medium);
 
-            Vector2 dashDir = ApplyDashLenience(DreamBlockDir, DashAssistOverride?.ToVector() ?? (Vector2) f_lastAim.GetValue(self));
+            Vector2 dashDir = ApplyDashLenience(DashlessDreamBlocksModule.DreamBlockDir, DashlessDreamBlocksModule.DashAssistOverride?.ToVector() ??
+                (Vector2) f_lastAim.GetValue(self));
             if (self.OverrideDashDirection.HasValue)
                 dashDir = self.OverrideDashDirection.Value;
-            dashDir = (Vector2) m_CorrectDashPrecision.Invoke(self, new object[]{ dashDir });
+            dashDir = (Vector2) m_CorrectDashPrecision.Invoke(self, new object[] { dashDir });
             self.Speed = dashDir * 240f;
             self.DashDir = dashDir;
 
             if (self.DashDir.X != 0f)
-                self.Facing = (Facings)Math.Sign(self.DashDir.X);
+                self.Facing = (Facings) Math.Sign(self.DashDir.X);
 
             if (self.StateMachine.PreviousState == Player.StStarFly)
                 self.SceneAs<Level>().Particles.Emit(FlyFeather.P_Boost, 12, self.Center, Vector2.One * 4f, (-dashDir).Angle());
