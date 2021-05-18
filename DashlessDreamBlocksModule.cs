@@ -82,7 +82,7 @@ namespace Celeste.Mod.DashlessDreamBlocks {
         }
 
         private static PlayerInventory? MapMeta_GetInventory(On.Celeste.Mod.Meta.MapMeta.orig_GetInventory orig, string meta) {
-            if (meta.StartsWith(INVENTORY_PREFIX)) {
+            if (!string.IsNullOrEmpty(meta) && meta.StartsWith(INVENTORY_PREFIX)) {
                 var inventory = DashlessDreamBlockInventory;
                 if (meta.Contains(INVENTORY_NOBACKPACK))
                     inventory.Backpack = false;
